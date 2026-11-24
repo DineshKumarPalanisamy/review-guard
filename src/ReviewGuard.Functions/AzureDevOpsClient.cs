@@ -1,0 +1,176 @@
+using System.Globalization;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Options;
+using ReviewGuard.Core;
+
+namespace ReviewGuard.Functions;
+
+/// <summary>
+/// Azure DevOps REST API 7.1 with a PAT (basic auth, empty user name).
+/// The org uses Microsoft accounts, so Managed Identity cannot sign in here. See DESIGN.md section 12.
+/// </summary>
+public sealed class AzureDevOpsClient(HttpClient http, IOptions<AzureDevOpsOptions> options) : IAzureDevOpsClient
+{
+    public const string LinesProperty = "ReviewGuard.ChangedLines";
+    public const string CommitProperty = "ReviewGuard.SourceCommit";
+    private const string ApiVersion = "api-version=7.1";
+
+    public async Task<PullRequestSnapshot> GetSnapshotAsync(PullRequestRef pr, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        var baseUrl = PrUrl(pr);
+
+        var prTask = GetJsonAsync($"{baseUrl}?{ApiVersion}", ct);
+        var propsTask = GetJsonAsync($"{baseUrl}/properties?{ApiVersion}", ct);
+        var iterationsTask = GetJsonAsync($"{baseUrl}/iterations?{ApiVersion}", ct);
+        var threadsTask = GetJsonAsync($"{baseUrl}/threads?{ApiVersion}", ct);
+        await Task.WhenAll(prTask, propsTask, iterationsTask, threadsTask).ConfigureAwait(false);
+
+        using var prDoc = await prTask.ConfigureAwait(false);
+        using var propsDoc = await propsTask.ConfigureAwait(false);
+        using var iterationsDoc = await iterationsTask.ConfigureAwait(false);
+        using var threadsDoc = await threadsTask.ConfigureAwait(false);
+
+        var p = prDoc.RootElement;
+        var props = propsDoc.RootElement.TryGetProperty("value", out var v) ? v : default;
+        var linesText = ReadProperty(props, LinesProperty);
+        int? lines = int.TryParse(linesText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : null;
+
+        var latestIteration = iterationsDoc.RootElement.GetProperty("value").EnumerateArray()
+            .OrderByDescending(i => i.GetProperty("id").GetInt32())
+            .First();
+
+        var approvers = p.TryGetProperty("reviewers", out var reviewers)
+            ? reviewers.EnumerateArray()
+                .Where(r => !(r.TryGetProperty("isContainer", out var c) && c.GetBoolean()))
+                .Select(r => new ApproverInfo(
+                    r.GetProperty("id").GetString()!,
+                    r.TryGetProperty("displayName", out var dn) ? dn.GetString() ?? "" : "",
+                    r.GetProperty("vote").GetInt32()))
+                .ToList()
+            : [];
+
+        return new PullRequestSnapshot(
+            Status: p.GetProperty("status").GetString() ?? "",
+            SourceCommitId: p.GetProperty("lastMergeSourceCommit").GetProperty("commitId").GetString() ?? "",
+            Title: p.TryGetProperty("title", out var t) ? t.GetString() : null,
+            WebUrl: $"{options.Value.OrganizationUrl.TrimEnd('/')}/{pr.ProjectId}/_git/{pr.RepositoryId}/pullrequest/{pr.PullRequestId}",
+            ChangedLines: lines,
+            LineCountCommitId: ReadProperty(props, CommitProperty),
+            LatestIterationId: latestIteration.GetProperty("id").GetInt32(),
+            LastPushAt: latestIteration.GetProperty("createdDate").GetDateTimeOffset(),
+            Approvers: approvers,
+            Threads: [.. threadsDoc.RootElement.GetProperty("value").EnumerateArray().Select(ReadThread)]);
+    }
+
+    public async Task PostStatusAsync(PullRequestRef pr, PrStatus status, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        ArgumentNullException.ThrowIfNull(status);
+
+        var body = new
+        {
+            state = status.State.ToString().ToLowerInvariant(),
+            description = status.Description,
+            context = new { genre = "review-guard", name = "review-depth" },
+            iterationId = status.IterationId,
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{PrUrl(pr)}/statuses?{ApiVersion}")
+        {
+            Content = JsonContent.Create(body),
+        };
+        Authorize(request);
+        using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
+    }
+
+    private string PrUrl(PullRequestRef pr) =>
+        $"{options.Value.OrganizationUrl.TrimEnd('/')}/{pr.ProjectId}/_apis/git/repositories/{pr.RepositoryId}/pullRequests/{pr.PullRequestId}";
+
+    private async Task<JsonDocument> GetJsonAsync(string url, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        Authorize(request);
+        using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
+        var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+    }
+
+    private void Authorize(HttpRequestMessage request)
+    {
+        var token = Convert.ToBase64String(Encoding.ASCII.GetBytes(":" + options.Value.Pat));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Basic", token);
+    }
+
+    private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        // A wrong PAT gives a 203 with a sign-in HTML page, not a 401.
+        if (response.StatusCode == System.Net.HttpStatusCode.NonAuthoritativeInformation || !response.IsSuccessStatusCode)
+        {
+            var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            throw new HttpRequestException(
+                $"Azure DevOps call {response.RequestMessage?.Method} {response.RequestMessage?.RequestUri?.AbsolutePath} returned {(int)response.StatusCode}: {text[..Math.Min(300, text.Length)]}",
+                null,
+                response.StatusCode);
+        }
+    }
+
+    /// <summary>Properties come as {"key": {"$type": "System.String", "$value": "450"}}.</summary>
+    internal static string? ReadProperty(JsonElement props, string name)
+    {
+        if (props.ValueKind != JsonValueKind.Object || !props.TryGetProperty(name, out var prop))
+        {
+            return null;
+        }
+
+        var value = prop.ValueKind == JsonValueKind.Object && prop.TryGetProperty("$value", out var inner) ? inner : prop;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.GetRawText(),
+            _ => null,
+        };
+    }
+
+    private static ThreadInfo ReadThread(JsonElement thread)
+    {
+        string? filePath = null;
+        int? line = null;
+        if (thread.TryGetProperty("threadContext", out var ctx) && ctx.ValueKind == JsonValueKind.Object)
+        {
+            filePath = ctx.TryGetProperty("filePath", out var fp) ? fp.GetString() : null;
+            line = ReadLine(ctx, "rightFileStart") ?? ReadLine(ctx, "leftFileStart");
+        }
+
+        var deleted = thread.TryGetProperty("isDeleted", out var d) && d.GetBoolean();
+        var authors = deleted || !thread.TryGetProperty("comments", out var comments)
+            ? []
+            : comments.EnumerateArray()
+                .Where(c => !(c.TryGetProperty("isDeleted", out var cd) && cd.GetBoolean()))
+                .Where(c => !c.TryGetProperty("commentType", out var type) || type.GetString() != "system")
+                .Select(c => c.GetProperty("author").GetProperty("id").GetString() ?? "")
+                .ToList();
+
+        return new ThreadInfo(filePath, line, authors);
+    }
+
+    private static int? ReadLine(JsonElement ctx, string name) =>
+        ctx.TryGetProperty(name, out var pos) && pos.ValueKind == JsonValueKind.Object && pos.TryGetProperty("line", out var l)
+            ? l.GetInt32()
+            : null;
+}
+
+public sealed class AzureDevOpsOptions
+{
+    public const string SectionName = "ReviewGuard";
+
+    /// <summary>For example https://dev.azure.com/DigiCovai</summary>
+    public string OrganizationUrl { get; set; } = "";
+
+    /// <summary>PAT with Code (read) and Code (status). In Azure: a Key Vault reference.</summary>
+    public string Pat { get; set; } = "";
+}

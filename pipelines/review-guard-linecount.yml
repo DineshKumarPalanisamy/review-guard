@@ -1,0 +1,29 @@
+# Review Guard: PR line count.
+# Runs for each PR update (started by the build validation branch policy on main).
+# Counts changed lines and writes them onto the PR as properties:
+#   ReviewGuard.ChangedLines and ReviewGuard.SourceCommit
+# The Review Guard Function reads these properties when a reviewer approves.
+#
+# Needs: the build service identity has "Contribute to pull requests" on this repository.
+# scripts/setup-ado.ps1 in the review-guard repository grants it.
+
+trigger: none   # No CI builds. Only the build validation policy starts this pipeline.
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  # Files that do not count as reviewed code. Separate with ";".
+  # A pattern without "/" matches the file name. "**/" matches any folders.
+  ExcludePatterns: 'package-lock.json;yarn.lock;pnpm-lock.yaml;*.lock;**/Migrations/**;*.Designer.cs;*.g.cs;*.min.js'
+
+steps:
+  - checkout: self
+    fetchDepth: 0     # Full history, so git can find the merge base with the target branch.
+    clean: true
+
+  - pwsh: ./pipelines/count-changed-lines.ps1
+    displayName: Count changed lines and write PR properties
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      EXCLUDEPATTERNS: $(ExcludePatterns)
