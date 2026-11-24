@@ -1,0 +1,13 @@
+# Local accounts and secrets (never commit)
+.azure/
+.claude/settings.local.json
+local.settings.json
+*.publishsettings
+.env
+
+# .NET build output
+bin/
+obj/
+*.user
+.vs/
+TestResults/
