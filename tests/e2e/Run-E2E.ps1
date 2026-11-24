@@ -235,31 +235,32 @@ function Invoke-Scenario([string] $Name) {
                 Write-Host "[$Name] approved before the pipeline finished"
                 $first = Wait-ReviewDepthStatus $prId @('pending', 'failed', 'succeeded') $StatusTimeoutSeconds
                 if (-not $first -or $first.state -ne 'pending') {
-                    return @{ Passed = $false; Detail = "expected pending first, got: $($first?.state) $($first?.description)" }
+                    return @{ Passed = $false; Detail = "expected pending first, got: $(${first}?.state) $(${first}?.description)" }
                 }
                 Write-Host "[$Name] saw pending: $($first.description)"
                 Wait-PrPipeline $prId $PipelineTimeoutSeconds | Out-Null
                 # The build-completed service hook starts a new check.
                 $final = Wait-ReviewDepthStatus $prId @('failed', 'succeeded') $StatusTimeoutSeconds
                 $ok = $final -and $final.state -eq 'failed'
-                return @{ Passed = $ok; Detail = "pending -> $($final?.state): $($final?.description)" }
+                return @{ Passed = $ok; Detail = "pending -> $(${final}?.state): $(${final}?.description)" }
             }
             default {
-                Write-Host "[$Name] waiting for the line count pipeline"
-                Wait-PrPipeline $prId $PipelineTimeoutSeconds | Out-Null
-
+                # Approve at once. The clock starts at the push, so waiting for the pipeline
+                # first would use up the allowed time. The build-completed hook re-checks
+                # with the stored approval time.
                 if ($Name -eq 'large-with-comment') {
                     Add-InlineComment $prId $path 10
                     Write-Host "[$Name] inline comment added"
                 }
 
                 Set-Approve $prId
-                Write-Host "[$Name] approved"
+                Write-Host "[$Name] approved, waiting for the line count pipeline"
+                Wait-PrPipeline $prId $PipelineTimeoutSeconds | Out-Null
 
                 $expected = if ($Name -eq 'large-fast') { 'failed' } else { 'succeeded' }
                 $status = Wait-ReviewDepthStatus $prId @('failed', 'succeeded') $StatusTimeoutSeconds
                 $ok = $status -and $status.state -eq $expected
-                return @{ Passed = $ok; Detail = "expected $expected, got $($status?.state): $($status?.description)" }
+                return @{ Passed = $ok; Detail = "expected $expected, got $(${status}?.state): $(${status}?.description)" }
             }
         }
     }

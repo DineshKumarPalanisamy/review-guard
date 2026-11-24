@@ -131,9 +131,18 @@ public sealed class ReviewGuardServiceTests
     public void Ci_build_without_pr_number_maps_to_nothing()
     {
         var evt = new BuildCompletedEvent("id", "build.complete", Push,
-            new BuildResource(1, "individualCI", new Dictionary<string, string>(), new BuildRepository("repo", "TfsGit"), null), null);
+            new BuildResource(1, "individualCI", new Dictionary<string, string>(), "refs/heads/main", new BuildRepository("repo", "TfsGit"), null), null);
 
         Assert.Null(evt.ToPullRequestRef());
+    }
+
+    [Fact]
+    public void Pr_number_falls_back_to_the_source_branch()
+    {
+        var evt = new BuildCompletedEvent("id", "build.complete", Push,
+            new BuildResource(1, "pullRequest", null, "refs/pull/391/merge", new BuildRepository("repo", "TfsGit"), new ProjectRef("proj")), null);
+
+        Assert.Equal(new PullRequestRef("proj", "repo", 391), evt.ToPullRequestRef());
     }
 
     private sealed class FakeAzureDevOps : IAzureDevOpsClient

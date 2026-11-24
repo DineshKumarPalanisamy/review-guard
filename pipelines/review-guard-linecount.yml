@@ -21,6 +21,7 @@ steps:
   - checkout: self
     fetchDepth: 0     # Full history, so git can find the merge base with the target branch.
     clean: true
+    persistCredentials: true  # The count script runs "git fetch" itself.
 
   - pwsh: ./pipelines/count-changed-lines.ps1
     displayName: Count changed lines and write PR properties

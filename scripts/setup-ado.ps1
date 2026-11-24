@@ -12,7 +12,7 @@
     4. Creates the YAML pipeline "review-guard-linecount".
     5. Grants the build service "Contribute to pull requests" on the repository,
        so the pipeline can write PR properties.
-    6. Branch policies on main:
+    6. Branch policies on the target branch (-TargetBranch):
          - build validation: runs the line count pipeline on each PR update
          - status check: review-guard/review-depth (optional by default = report-only)
          - minimum reviewers: 1, reset votes on new push
@@ -38,6 +38,8 @@ param(
     [string] $Project = 'Internal',
     [string] $Repo = 'review-guard-sandbox',
     [string] $PipelineName = 'review-guard-linecount',
+    # Branch the policies guard. The sandbox uses 'trunk' (see step 3).
+    [string] $TargetBranch = 'main',
     # Off = report-only phase (status check is optional). On = merge is blocked.
     [switch] $PolicyBlocking
 )
@@ -86,6 +88,22 @@ function Invoke-Ado {
     if ($out) { return ($out | Out-String | ConvertFrom-Json -Depth 50) }
 }
 
+# Direct REST, for areas "az devops invoke" does not know (hooks, security, location).
+# Uses the same PAT as the CLI: the AZURE_DEVOPS_EXT_PAT environment variable.
+function Invoke-AdoRest {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [string] $Method = 'GET',
+        [object] $Body
+    )
+    if (-not $env:AZURE_DEVOPS_EXT_PAT) { throw 'Set AZURE_DEVOPS_EXT_PAT (the same PAT as az devops login) for this step.' }
+    $auth = @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$($env:AZURE_DEVOPS_EXT_PAT)")) }
+    $sep = if ($Path.Contains('?')) { '&' } else { '?' }
+    $params = @{ Method = $Method; Headers = $auth; Uri = "$Organization/_apis/$Path${sep}api-version=7.1" }
+    if ($null -ne $Body) { $params.ContentType = 'application/json'; $params.Body = ConvertTo-Json -InputObject $Body -Depth 20 }
+    Invoke-RestMethod @params
+}
+
 try {
     # ---------------------------------------------------------------- 1. CLI and sign-in
     Write-Step 'Check azure-devops CLI extension and sign-in'
@@ -110,25 +128,36 @@ try {
     $repoId = $repoObj.id
 
     # ---------------------------------------------------------------- 3. Pipeline files
-    Write-Step 'Push pipeline files to main'
+    Write-Step "Push pipeline files to $TargetBranch"
     $files = [ordered]@{
         '/README.md'                            = "# review-guard-sandbox`n`nTest repository for Review Guard. PRs here are checked by the review-guard Function.`n"
         '/pipelines/review-guard-linecount.yml' = Get-Content -Raw (Join-Path $repoRoot 'pipelines/review-guard-linecount.yml')
         '/pipelines/count-changed-lines.ps1'    = Get-Content -Raw (Join-Path $repoRoot 'pipelines/count-changed-lines.ps1')
     }
 
-    $mainRef = Invoke-Ado -Area git -Resource refs -Route @{ project = $projectId; repositoryId = $repoId } -Query @{ filter = 'heads/main' }
-    $mainHead = if ($mainRef -and $mainRef.count -gt 0) { $mainRef.value[0].objectId } else { $null }
+    function Get-BranchHead([string] $name) {
+        $ref = Invoke-Ado -Area git -Resource refs -Route @{ project = $projectId; repositoryId = $repoId } -Query @{ filter = "heads/$name" }
+        $hit = @($ref.value | Where-Object name -eq "refs/heads/$name")
+        if ($hit.Count) { $hit[0].objectId } else { $null }
+    }
+    $mainHead = Get-BranchHead 'main'
+    # The guarded branch. In the sandbox it is not main, because project-wide policies on main
+    # (yours, not ours) block direct pushes there. Created from main when missing.
+    if ($TargetBranch -ne 'main' -and $mainHead -and -not (Get-BranchHead $TargetBranch)) {
+        az repos ref create --name "heads/$TargetBranch" --object-id $mainHead --repository $repoId --project $Project --only-show-errors -o none
+        Write-Host "Created branch $TargetBranch from main"
+    }
+    $targetHead = Get-BranchHead $TargetBranch
 
     $changes = @()
     foreach ($path in $files.Keys) {
         $newText = $files[$path] -replace "`r`n", "`n"
         $existing = $null
-        if ($mainHead) {
+        if ($targetHead) {
             try {
                 $existing = az devops invoke --org $Organization --area git --resource items `
                     --route-parameters project=$projectId repositoryId=$repoId `
-                    --query-parameters "path=$path" 'includeContent=true' 'versionDescriptor.version=main' `
+                    --query-parameters "path=$path" 'includeContent=true' "versionDescriptor.version=$TargetBranch" `
                     --api-version 7.1 --only-show-errors -o json 2>$null | ConvertFrom-Json
             }
             catch { $existing = $null }
@@ -146,8 +175,17 @@ try {
     }
 
     if ($changes.Count) {
+        # On a re-run, our own branch policies block a direct push (TF402455).
+        # Turn off the policies on this repository for the push. Step 6 turns them on again.
+        $guarded = @((Invoke-Ado -Area policy -Resource configurations -Route @{ project = $projectId }).value |
+            Where-Object { $_.isEnabled -and ($_.settings.scope | Where-Object { $_.repositoryId -eq $repoId }) })
+        foreach ($policy in $guarded) {
+            $off = @{ isEnabled = $false; isBlocking = $policy.isBlocking; type = @{ id = $policy.type.id }; settings = $policy.settings }
+            Invoke-Ado -Area policy -Resource configurations -Method PUT -Route @{ project = $projectId; configurationId = $policy.id } -Body $off | Out-Null
+            Write-Host "Paused policy $($policy.id) for the push"
+        }
         $push = @{
-            refUpdates = @(@{ name = 'refs/heads/main'; oldObjectId = ($mainHead ?? $EmptyObjectId) })
+            refUpdates = @(@{ name = "refs/heads/$TargetBranch"; oldObjectId = ($targetHead ?? $EmptyObjectId) })
             commits    = @(@{ comment = 'Add Review Guard line count pipeline'; changes = $changes })
         }
         Invoke-Ado -Area git -Resource pushes -Method POST -Route @{ project = $projectId; repositoryId = $repoId } -Body $push | Out-Null
@@ -175,26 +213,51 @@ try {
     Write-Step 'Grant "Contribute to pull requests" to the build service'
     # Two build identities exist. Which one a pipeline uses depends on the project setting
     # "Limit job authorization scope to current project". Grant both.
-    $connection = Invoke-Ado -Area Location -Resource connectionData -ApiVersion '7.1-preview'
-    $collectionId = $connection.instanceId
-    $buildDescriptors = @(
-        "Microsoft.TeamFoundation.ServiceIdentity;${collectionId}:Build:${projectId}",   # project scoped
-        "Microsoft.TeamFoundation.ServiceIdentity;${collectionId}:Build:${collectionId}" # collection scoped
-    )
-    $token = "repoV2/$projectId/$repoId"
-    $ace = @{
-        token                = $token
-        merge                = $true
-        accessControlEntries = @($buildDescriptors | ForEach-Object { @{ descriptor = $_; allow = $PullRequestContributeBit; deny = 0 } })
+    # "az devops invoke" does not know the Location and Security areas, so these two calls use
+    # REST directly with the same PAT the CLI uses (AZURE_DEVOPS_EXT_PAT). No PAT there: skip.
+    if (-not $env:AZURE_DEVOPS_EXT_PAT) {
+        Write-Warning 'AZURE_DEVOPS_EXT_PAT is not set. Skipping. Grant "Contribute to pull requests" to the build service by hand.'
     }
-    Invoke-Ado -Area security -Resource accesscontrolentries -Method POST -Route @{ securityNamespaceId = $GitSecurityNamespace } -Body $ace | Out-Null
-    Write-Host "Allowed bit $PullRequestContributeBit on $token"
+    else {
+        $headers = @{ Authorization = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$($env:AZURE_DEVOPS_EXT_PAT)")) }
+        $connection = Invoke-RestMethod -Headers $headers -Uri "$Organization/_apis/connectionData?api-version=7.1-preview"
+        $collectionId = $connection.instanceId
+        # Build identities are Graph "svc" users. principalName = project id (project scoped) or
+        # collection id (collection scoped). The Graph descriptor "svc.<base64>" decodes to the
+        # identity part of the security descriptor.
+        $orgName = ([uri]$Organization).AbsolutePath.Trim('/')
+        $svcUsers = (Invoke-RestMethod -Headers $headers -Uri "https://vssps.dev.azure.com/$orgName/_apis/graph/users?subjectTypes=svc&api-version=7.1-preview.1").value
+        $buildDescriptors = @($svcUsers | Where-Object { $_.principalName -in @($projectId, $collectionId) } | ForEach-Object {
+                $b64 = $_.descriptor.Substring(4)
+                $b64 += '=' * ((4 - $b64.Length % 4) % 4)
+                'Microsoft.TeamFoundation.ServiceIdentity;' + [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
+            })
+        $token = "repoV2/$projectId/$repoId"
+        # One call per identity: an identity that was never used does not exist yet (TF14045).
+        foreach ($descriptor in $buildDescriptors) {
+            $ace = @{
+                token                = $token
+                merge                = $true
+                accessControlEntries = @(@{ descriptor = $descriptor; allow = $PullRequestContributeBit; deny = 0 })
+            }
+            try {
+                Invoke-RestMethod -Method Post -Headers $headers -ContentType 'application/json' `
+                    -Uri "$Organization/_apis/accesscontrolentries/$GitSecurityNamespace`?api-version=7.1" `
+                    -Body (ConvertTo-Json $ace -Depth 10) | Out-Null
+                Write-Host "Allowed bit $PullRequestContributeBit on $token for $($descriptor.Split(':')[-1])"
+            }
+            catch {
+                if ("$_" -notmatch 'TF14045') { throw }
+                Write-Host "Skipped (identity does not exist): $($descriptor.Split(':')[-1])"
+            }
+        }
+    }
 
     # ---------------------------------------------------------------- 6. Branch policies
-    Write-Step 'Branch policies on main'
-    $scope = @(@{ repositoryId = $repoId; refName = 'refs/heads/main'; matchKind = 'exact' })
+    Write-Step "Branch policies on $TargetBranch"
+    $scope = @(@{ repositoryId = $repoId; refName = "refs/heads/$TargetBranch"; matchKind = 'exact' })
     $existingPolicies = (Invoke-Ado -Area policy -Resource configurations -Route @{ project = $projectId }).value |
-        Where-Object { $_.settings.scope | Where-Object { $_.repositoryId -eq $repoId -and $_.refName -eq 'refs/heads/main' } }
+        Where-Object { $_.settings.scope | Where-Object { $_.repositoryId -eq $repoId -and $_.refName -eq "refs/heads/$TargetBranch" } }
 
     function Set-Policy([string] $typeId, [bool] $blocking, [hashtable] $settings, [scriptblock] $match) {
         $body = @{ isEnabled = $true; isBlocking = $blocking; type = @{ id = $typeId }; settings = $settings }
@@ -239,13 +302,13 @@ try {
 
     # ---------------------------------------------------------------- 7. Service hooks
     Write-Step 'Service hooks'
-    $existingHooks = (Invoke-Ado -Area hooks -Resource subscriptions).value
+    $existingHooks = (Invoke-AdoRest -Path hooks/subscriptions).value
 
-    function Set-Hook([string] $eventType, [hashtable] $publisherInputs, [string] $path) {
+    function Set-Hook([string] $eventType, [hashtable] $publisherInputs, [string] $path, [string] $resourceVersion = '1.0') {
         $body = @{
             publisherId      = 'tfs'
             eventType        = $eventType
-            resourceVersion  = '1.0'
+            resourceVersion  = $resourceVersion
             consumerId       = 'webHooks'
             consumerActionId = 'httpRequest'
             publisherInputs  = $publisherInputs
@@ -263,11 +326,11 @@ try {
             $_.consumerInputs.url -and ($_.consumerInputs.url -split '\?')[0] -eq "$FunctionBaseUrl$path"
         } | Select-Object -First 1
         if ($found) {
-            Invoke-Ado -Area hooks -Resource subscriptions -Method PUT -Route @{ subscriptionId = $found.id } -Body $body | Out-Null
+            Invoke-AdoRest -Path "hooks/subscriptions/$($found.id)" -Method PUT -Body $body | Out-Null
             Write-Host "Updated hook $($found.id) ($eventType)"
             return $found.id
         }
-        $created = Invoke-Ado -Area hooks -Resource subscriptions -Method POST -Body $body
+        $created = Invoke-AdoRest -Path hooks/subscriptions -Method POST -Body $body
         Write-Host "Created hook $($created.id) ($eventType)"
         return $created.id
     }
@@ -283,7 +346,7 @@ try {
         projectId      = $projectId
         definitionName = $PipelineName
         buildStatus    = ''                              # Any result. The Function checks it.
-    } '/api/hooks/build-completed'
+    } '/api/hooks/build-completed' '2.0'   # 2.0 sends the Build object with triggerInfo and repository.
 
     # ---------------------------------------------------------------- Summary
     Write-Step 'Summary'
