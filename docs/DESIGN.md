@@ -1,6 +1,6 @@
 # PR Review Guard: design notes
 
-Status: design agreed on 2026-11-24. No code yet.
+Status: version 1 deployed on 2026-11-24, report-only, on the sandbox repository.
 
 ## 1. Problem
 
@@ -166,6 +166,11 @@ Status contract (the branch policy matches on `genre` + `name`):
 | 4 | Vote 5 ("approved with suggestions") | Same rule as vote 10. |
 | 5 | First thresholds | 200 lines, 30 s per 100 lines. Both are app settings. |
 | - | Code repository | Public GitHub repository. No secrets in the repository. |
+| - | Hosting | Flex Consumption, .NET 10 isolated, Central India. Storage with shared keys off, Managed Identity only. |
+| - | Approval time | The first time the Function sees an approval for a reviewer + source commit is stored. Later events (build completed, vote again on the same commit) reuse it. A new push resets votes, so a new commit gets a new time. |
+| - | Several approvers | One PR status. The worst result wins (failed, then pending, then succeeded). |
+| - | Build hook | `build.complete` with resource version 2.0. Version 1.0 has no PR number or repository. |
+| - | Sandbox | Repo `review-guard-sandbox` in project `Internal` guards branch `trunk`, not `main`: project-wide policies on `main` block direct pushes, and the setup script must push the pipeline file. |
 
 ## 13. Open questions
 
