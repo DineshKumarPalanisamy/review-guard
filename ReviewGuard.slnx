@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ReviewGuard.Core/ReviewGuard.Core.csproj" />
+    <Project Path="src/ReviewGuard.Functions/ReviewGuard.Functions.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ReviewGuard.Core.Tests/ReviewGuard.Core.Tests.csproj" />
+  </Folder>
+</Solution>

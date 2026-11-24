@@ -1,0 +1,10 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "ReviewGuard__WebhookSecret": "local-dev-secret",
+    "ReviewGuard__MinLines": "200",
+    "ReviewGuard__SecondsPer100Lines": "30"
+  }
+}
