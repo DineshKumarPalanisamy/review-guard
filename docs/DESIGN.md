@@ -60,7 +60,7 @@ The Function keeps no state between events.
 | 2 | Azure Function, HTTP trigger, Consumption plan | Azure | Receives the event, runs the rule |
 | 3 | Storage account | Azure | Required by Functions. Table Storage holds the audit log. |
 | 4 | Identity for Azure DevOps API calls | Azure + Azure DevOps | PAT in Key Vault (different tenants, see section 12) |
-| 5 | Alert channel | Teams Workflows webhook | Message to the CTO |
+| 5 | Alert channel | Azure Monitor log alert + action group (email) | Message to the CTO |
 | 6 | Application Insights | Azure | Logs and failures |
 | 7 | Validation pipeline | Azure DevOps | Counts changed lines on each push |
 | 8 | Branch policy: status check | Azure DevOps | Blocks the merge |
@@ -162,7 +162,7 @@ Status contract (the branch policy matches on `genre` + `name`):
 | # | Question | Decision |
 |---|---|---|
 | 1 | Same Entra tenant for Azure and Azure DevOps? | No. The `DigiCovai` org uses Microsoft accounts (tenant `0000...`). Use a PAT stored in Key Vault, read by the Function's Managed Identity. |
-| 2 | Alert channel | Teams Workflows webhook. Webhook URL stored in Key Vault. |
+| 2 | Alert channel | Email through an Azure Monitor log alert on the `ALERT PR` log line (every 5 minutes). Teams free has no Workflows webhooks. The Teams sender stays in the code for a Microsoft 365 account later. |
 | 4 | Vote 5 ("approved with suggestions") | Same rule as vote 10. |
 | 5 | First thresholds | 200 lines, 30 s per 100 lines. Both are app settings. |
 | - | Code repository | Public GitHub repository. No secrets in the repository. |

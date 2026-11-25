@@ -35,8 +35,10 @@ PR status: genre `review-guard`, name `review-depth`. States: `succeeded`, `fail
 3. Azure DevOps: set `AZURE_DEVOPS_EXT_PAT` (or `az devops login`), then run
    `./scripts/setup-ado.ps1 -FunctionBaseUrl <url> -FunctionKey <key> -WebhookSecret <secret> -TargetBranch <branch>`.
    Without `-PolicyBlocking` the status check is optional (report-only phase).
-4. Optional: Teams Workflows webhook URL as app setting `ReviewGuard__TeamsWebhookUrl`.
-   Without it, alerts are only written to the logs (`ALERT PR ...`).
+4. Alert email: `./scripts/deploy-azure.ps1 -AlertEmail <address>` adds an Azure Monitor log alert.
+   It finds the `ALERT PR ...` log lines every 5 minutes and emails each one.
+   Optional: a Teams Workflows webhook URL as app setting `ReviewGuard__TeamsWebhookUrl`
+   (needs a Microsoft 365 work account; Teams free cannot receive webhooks).
 
 ## Settings
 
