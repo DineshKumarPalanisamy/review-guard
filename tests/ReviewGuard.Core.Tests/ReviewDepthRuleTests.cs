@@ -13,8 +13,10 @@ public sealed class ReviewDepthRuleTests
         int secondsAfterPush = 50,
         int comments = 0,
         string? lineCountCommit = Commit,
-        DateTimeOffset? reviewerAdded = null) =>
-        new(lines, lineCountCommit, Commit, Push.AddSeconds(secondsAfterPush), Push, reviewerAdded, comments);
+        DateTimeOffset? reviewerAdded = null,
+        string[]? critical = null,
+        int botThreads = 0) =>
+        new(lines, lineCountCommit, Commit, Push.AddSeconds(secondsAfterPush), Push, reviewerAdded, comments, critical, botThreads);
 
     [Fact]
     public void Large_fast_approval_without_inline_comments_fails_and_alerts()
@@ -135,5 +137,62 @@ public sealed class ReviewDepthRuleTests
         // 100 lines, 50 s. Default options: small PR. Strict options: allowed 60 s, so fast.
         Assert.Equal(ReviewDepthState.Succeeded, ReviewDepthRule.Evaluate(Input(lines: 100), Options).State);
         Assert.Equal(ReviewDepthState.Failed, ReviewDepthRule.Evaluate(Input(lines: 100), strict).State);
+    }
+
+    [Fact]
+    public void Small_pr_on_a_critical_path_approved_fast_fails_with_reasons()
+    {
+        var result = ReviewDepthRule.Evaluate(Input(lines: 30, secondsAfterPush: 20, critical: ["/src/Payments/Charge.cs"]), Options);
+
+        Assert.Equal(ReviewDepthState.Failed, result.State);
+        Assert.True(result.Alert);
+        Assert.Equal("30 lines (1 critical file) approved in 20 s, no inline comments", result.Description);
+        // 30 lines x 30 s / 100 = 9 s, raised to the 60 s floor for risky PRs.
+        Assert.Equal(TimeSpan.FromSeconds(60), result.AllowedTime);
+        Assert.Equal(
+            ["Touches critical paths: /src/Payments/Charge.cs", "Approved in 20 s (allowed 60 s)", "No inline comments by the reviewer"],
+            result.Reasons);
+    }
+
+    [Fact]
+    public void Small_pr_on_a_critical_path_reviewed_slowly_succeeds()
+    {
+        var result = ReviewDepthRule.Evaluate(Input(lines: 30, secondsAfterPush: 61, critical: ["/src/Payments/Charge.cs"]), Options);
+
+        Assert.Equal(ReviewDepthState.Succeeded, result.State);
+    }
+
+    [Fact]
+    public void Small_pr_on_a_critical_path_with_inline_comments_succeeds()
+    {
+        var result = ReviewDepthRule.Evaluate(Input(lines: 30, secondsAfterPush: 5, comments: 1, critical: ["/src/Auth/Token.cs"]), Options);
+
+        Assert.Equal(ReviewDepthState.Succeeded, result.State);
+    }
+
+    [Fact]
+    public void Open_bot_threads_make_a_small_pr_risky()
+    {
+        var result = ReviewDepthRule.Evaluate(Input(lines: 30, secondsAfterPush: 20, botThreads: 2), Options);
+
+        Assert.Equal(ReviewDepthState.Failed, result.State);
+        Assert.Contains("2 unresolved bot review threads at approval", result.Reasons!);
+    }
+
+    [Fact]
+    public void Large_pr_lists_all_reasons_and_shortens_long_path_lists()
+    {
+        string[] critical = ["/a/Auth/1.cs", "/a/Auth/2.cs", "/a/Auth/3.cs", "/a/Auth/4.cs", "/a/Auth/5.cs"];
+
+        var result = ReviewDepthRule.Evaluate(Input(critical: critical), Options);
+
+        Assert.Equal(
+            [
+                "Large PR: 450 changed lines (limit 200)",
+                "Touches critical paths: /a/Auth/1.cs, /a/Auth/2.cs, /a/Auth/3.cs and 2 more",
+                "Approved in 50 s (allowed 135 s)",
+                "No inline comments by the reviewer",
+            ],
+            result.Reasons);
     }
 }

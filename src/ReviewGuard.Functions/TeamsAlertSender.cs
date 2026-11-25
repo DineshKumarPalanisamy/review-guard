@@ -17,7 +17,9 @@ public sealed partial class TeamsAlertSender(
     public async Task SendAsync(AlertMessage alert, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(alert);
-        LogAlert(logger, alert.PullRequest.PullRequestId, alert.ReviewerName, alert.Description);
+        // One line, so the Azure Monitor alert rule ("ALERT PR" prefix) puts all reasons in the email.
+        var detail = alert.Reasons is { Count: > 0 } r ? string.Join("; ", r) : alert.Description;
+        LogAlert(logger, alert.PullRequest.PullRequestId, alert.ReviewerName, detail);
 
         if (string.IsNullOrWhiteSpace(options.Value.TeamsWebhookUrl))
         {
@@ -38,9 +40,10 @@ public sealed partial class TeamsAlertSender(
                         version = "1.4",
                         body = new object[]
                         {
-                            new { type = "TextBlock", text = "Review Guard: fast approval", weight = "Bolder", size = "Medium" },
+                            new { type = "TextBlock", text = "Review Guard: no evidence of review", weight = "Bolder", size = "Medium" },
                             new { type = "TextBlock", text = $"PR {alert.PullRequest.PullRequestId}: {alert.Title}", wrap = true },
-                            new { type = "TextBlock", text = $"{alert.ReviewerName}: {alert.Description}", wrap = true },
+                            new { type = "TextBlock", text = $"Approved by {alert.ReviewerName}", wrap = true },
+                            new { type = "TextBlock", text = ReasonList(alert), wrap = true },
                         },
                         actions = new[] { new { type = "Action.OpenUrl", title = "Open PR", url = alert.WebUrl } },
                     },
@@ -51,6 +54,12 @@ public sealed partial class TeamsAlertSender(
         using var response = await http.PostAsJsonAsync(options.Value.TeamsWebhookUrl, card, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
     }
+
+    /// <summary>Markdown bullet list of the reasons. Falls back to the one-line description.</summary>
+    private static string ReasonList(AlertMessage alert) =>
+        alert.Reasons is { Count: > 0 } reasons
+            ? string.Join("\n", reasons.Select(r => "- " + r))
+            : alert.Description;
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "ALERT PR {PullRequestId}: {ReviewerName}: {Description}")]
     private static partial void LogAlert(ILogger logger, int pullRequestId, string reviewerName, string description);

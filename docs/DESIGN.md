@@ -191,6 +191,25 @@ Status contract (the branch policy matches on `genre` + `name`):
 }
 ```
 
+### Evidence rule (Phase 2, built 2026-11-25)
+
+```
+line count missing or stale                       -> pending
+not large, no critical path, no open bot thread   -> succeeded (not checked)
+review time > allowed time                        -> succeeded
+inline comments by the reviewer                   -> succeeded
+otherwise                                         -> failed + alert, with a list of reasons
+```
+
+- **Risky** = large (200+ lines), or touches a critical path, or has open bot review threads.
+- **Allowed time** = 30 s per 100 lines. For a PR on a critical path or with open bot threads,
+  at least 60 s (`MinRiskyReviewSeconds`), or a 20-line payment change would get only 6 s.
+- **Changed paths** come from `iterations/{last}/changes?$compareTo=0`, paged with `$top` and
+  `$skip` until `nextSkip` is 0. The author can't edit this list.
+- **Critical path lists add up**: `default` + project + `Project/Repository`.
+- **Bot threads**: open threads (active or pending) whose first comment is by a name in
+  `BotReviewerNames`. Off when the list is empty.
+
 ## 13. Open questions
 
 1. Who can clear a `failed` status? Proposal: a second reviewer's approval, or a new inline

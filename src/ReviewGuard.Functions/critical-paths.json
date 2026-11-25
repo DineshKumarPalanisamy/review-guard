@@ -1,0 +1,18 @@
+{
+  // Critical paths. Lists add up: "default" + the project list + the "Project/Repository" list.
+  // Patterns: ** = any folders, * = any characters in one name. Case-insensitive.
+  // Changing this file needs a merge to review-guard and a redeploy. See docs/DESIGN.md.
+  "default": [
+    "**/Auth/**",
+    "**/Authentication/**",
+    "**/Payments/**",
+    "**/Security/**",
+    "**/Migrations/**"
+  ],
+  "projects": {
+    "Internal/review-guard-sandbox": [
+      "src/SampleApp/Auth/**",
+      "src/SampleApp/Payments/**"
+    ]
+  }
+}

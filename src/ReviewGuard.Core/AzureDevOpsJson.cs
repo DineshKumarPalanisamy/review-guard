@@ -62,6 +62,28 @@ public static class AzureDevOpsJson
         return result;
     }
 
+    /// <summary>File paths from one page of the iteration changes API. Folders are skipped.</summary>
+    public static IEnumerable<string> ReadChangedPaths(JsonElement changesRoot)
+    {
+        if (!changesRoot.TryGetProperty("changeEntries", out var entries) || entries.ValueKind != JsonValueKind.Array)
+        {
+            yield break;
+        }
+
+        foreach (var entry in entries.EnumerateArray())
+        {
+            if (!entry.TryGetProperty("item", out var item)
+                || (item.TryGetProperty("isFolder", out var folder) && folder.ValueKind == JsonValueKind.True)
+                || !item.TryGetProperty("path", out var path)
+                || path.GetString() is not { Length: > 0 } value)
+            {
+                continue;
+            }
+
+            yield return value;
+        }
+    }
+
     private static string? IdentityId(JsonElement identities, string? key) =>
         key is not null && identities.TryGetProperty(key, out var identity) && identity.TryGetProperty("id", out var id)
             ? id.GetString()
