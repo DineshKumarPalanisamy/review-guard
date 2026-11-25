@@ -20,9 +20,10 @@ public sealed class ReviewGuardServiceTests
         string? lineCommit = "c1",
         IReadOnlyList<ApproverInfo>? approvers = null,
         IReadOnlyList<ThreadInfo>? threads = null,
-        string status = "active") =>
+        string status = "active",
+        IReadOnlyList<ReviewerAddition>? additions = null) =>
         new(status, "c1", "Title", "https://x", lines, lineCommit, 3, Push,
-            approvers ?? [new ApproverInfo("ana", "Ana", Votes.Approved)], threads ?? []);
+            approvers ?? [new ApproverInfo("ana", "Ana", Votes.Approved)], threads ?? [], additions ?? []);
 
     [Fact]
     public async Task Fast_approval_posts_failed_and_alerts_once()
@@ -50,6 +51,58 @@ public sealed class ReviewGuardServiceTests
 
         Assert.True(again.Skipped);
         Assert.Single(ado.Posted);
+    }
+
+    [Fact]
+    public async Task Failed_call_is_retried_with_the_same_event_id()
+    {
+        ado.Snapshot = Snapshot();
+        ado.FailNextSnapshot = true;
+
+        await Assert.ThrowsAsync<HttpRequestException>(
+            () => Service().EvaluateAsync(Pr, "e1", Push.AddSeconds(50), TestContext.Current.CancellationToken));
+        var retry = await Service().EvaluateAsync(Pr, "e1", Push.AddSeconds(50), TestContext.Current.CancellationToken);
+
+        Assert.False(retry.Skipped);
+        Assert.Equal(ReviewDepthState.Failed, Assert.Single(ado.Posted).State);
+    }
+
+    [Fact]
+    public async Task Skipped_event_is_still_marked_as_seen()
+    {
+        ado.Snapshot = Snapshot(approvers: [new("ana", "Ana", 0)]);
+
+        await Service().EvaluateAsync(Pr, "e1", Push, TestContext.Current.CancellationToken);
+
+        Assert.Contains("e1", audit.Seen);
+    }
+
+    [Fact]
+    public async Task Clock_starts_when_someone_added_the_reviewer_after_the_push()
+    {
+        // Pushed at 10:00, Ana added at 10:30, approved at 10:30:20. From the push that is
+        // 30 minutes (passes). From the time she was added it is 20 s (fails).
+        ado.Snapshot = Snapshot(additions: [new ReviewerAddition("ana", Push.AddMinutes(30))]);
+
+        var result = await Service().EvaluateAsync(Pr, "e1", Push.AddMinutes(30).AddSeconds(20), TestContext.Current.CancellationToken);
+
+        Assert.Equal(ReviewDepthState.Failed, result.Status!.State);
+        Assert.Equal(TimeSpan.FromSeconds(20), result.Decisions[0].Decision.ReviewTime);
+    }
+
+    [Fact]
+    public void Reviewer_added_time_is_the_last_addition_before_the_approval()
+    {
+        ReviewerAddition[] additions =
+        [
+            new("ana", Push.AddMinutes(1)),
+            new("ana", Push.AddMinutes(5)),
+            new("ana", Push.AddMinutes(20)), // after the approval: ignored
+            new("ben", Push.AddMinutes(9)),
+        ];
+
+        Assert.Equal(Push.AddMinutes(5), ReviewGuardService.ReviewerAddedAt(additions, "ANA", Push.AddMinutes(10)));
+        Assert.Null(ReviewGuardService.ReviewerAddedAt(additions, "cy", Push.AddMinutes(10)));
     }
 
     [Fact]
@@ -151,7 +204,18 @@ public sealed class ReviewGuardServiceTests
 
         public List<PrStatus> Posted { get; } = [];
 
-        public Task<PullRequestSnapshot> GetSnapshotAsync(PullRequestRef pr, CancellationToken ct) => Task.FromResult(Snapshot);
+        public bool FailNextSnapshot { get; set; }
+
+        public Task<PullRequestSnapshot> GetSnapshotAsync(PullRequestRef pr, CancellationToken ct)
+        {
+            if (FailNextSnapshot)
+            {
+                FailNextSnapshot = false;
+                throw new HttpRequestException("Azure DevOps returned 503");
+            }
+
+            return Task.FromResult(Snapshot);
+        }
 
         public Task PostStatusAsync(PullRequestRef pr, PrStatus status, CancellationToken ct)
         {
@@ -162,12 +226,19 @@ public sealed class ReviewGuardServiceTests
 
     private sealed class FakeAudit : IAuditStore
     {
-        private readonly HashSet<string> events = [];
         private readonly Dictionary<string, ApprovalRecord> approvals = [];
+
+        public HashSet<string> Seen { get; } = [];
 
         public List<DecisionRecord> Decisions { get; } = [];
 
-        public Task<bool> TryMarkEventAsync(string eventId, CancellationToken ct) => Task.FromResult(events.Add(eventId));
+        public Task<bool> IsEventSeenAsync(string eventId, CancellationToken ct) => Task.FromResult(Seen.Contains(eventId));
+
+        public Task MarkEventSeenAsync(string eventId, CancellationToken ct)
+        {
+            Seen.Add(eventId);
+            return Task.CompletedTask;
+        }
 
         public Task<ApprovalRecord> GetOrAddApprovalAsync(ApprovalRecord candidate, CancellationToken ct)
         {

@@ -36,7 +36,7 @@ public sealed class AzureDevOpsClient(HttpClient http, IOptions<AzureDevOpsOptio
 
         var p = prDoc.RootElement;
         var props = propsDoc.RootElement.TryGetProperty("value", out var v) ? v : default;
-        var linesText = ReadProperty(props, LinesProperty);
+        var linesText = AzureDevOpsJson.ReadProperty(props, LinesProperty);
         int? lines = int.TryParse(linesText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : null;
 
         var latestIteration = iterationsDoc.RootElement.GetProperty("value").EnumerateArray()
@@ -59,11 +59,12 @@ public sealed class AzureDevOpsClient(HttpClient http, IOptions<AzureDevOpsOptio
             Title: p.TryGetProperty("title", out var t) ? t.GetString() : null,
             WebUrl: $"{options.Value.OrganizationUrl.TrimEnd('/')}/{pr.ProjectId}/_git/{pr.RepositoryId}/pullrequest/{pr.PullRequestId}",
             ChangedLines: lines,
-            LineCountCommitId: ReadProperty(props, CommitProperty),
+            LineCountCommitId: AzureDevOpsJson.ReadProperty(props, CommitProperty),
             LatestIterationId: latestIteration.GetProperty("id").GetInt32(),
             LastPushAt: latestIteration.GetProperty("createdDate").GetDateTimeOffset(),
             Approvers: approvers,
-            Threads: [.. threadsDoc.RootElement.GetProperty("value").EnumerateArray().Select(ReadThread)]);
+            Threads: [.. threadsDoc.RootElement.GetProperty("value").EnumerateArray().Select(ReadThread)],
+            ReviewerAdditions: AzureDevOpsJson.ReadReviewerAdditions(threadsDoc.RootElement));
     }
 
     public async Task PostStatusAsync(PullRequestRef pr, PrStatus status, CancellationToken ct)
@@ -117,23 +118,6 @@ public sealed class AzureDevOpsClient(HttpClient http, IOptions<AzureDevOpsOptio
                 null,
                 response.StatusCode);
         }
-    }
-
-    /// <summary>Properties come as {"key": {"$type": "System.String", "$value": "450"}}.</summary>
-    internal static string? ReadProperty(JsonElement props, string name)
-    {
-        if (props.ValueKind != JsonValueKind.Object || !props.TryGetProperty(name, out var prop))
-        {
-            return null;
-        }
-
-        var value = prop.ValueKind == JsonValueKind.Object && prop.TryGetProperty("$value", out var inner) ? inner : prop;
-        return value.ValueKind switch
-        {
-            JsonValueKind.String => value.GetString(),
-            JsonValueKind.Number => value.GetRawText(),
-            _ => null,
-        };
     }
 
     private static ThreadInfo ReadThread(JsonElement thread)
