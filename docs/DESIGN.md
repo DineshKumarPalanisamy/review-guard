@@ -176,3 +176,15 @@ Status contract (the branch policy matches on `genre` + `name`):
 
 1. Who can clear a `failed` status? Proposal: a second reviewer's approval, or a new inline
    review by the same reviewer.
+
+## 14. Phase 1 changes (planned, see ROADMAP.md)
+
+1. **Mark the event after the status.** Today `TryMarkEventAsync` runs first. If the snapshot
+   call or the status post fails, Azure DevOps retries with the same event id, the retry is
+   skipped as a duplicate, and the PR has no status. Change: check the id first, but write it
+   only after the status is posted. A repeat run is safe because the approval time is stored
+   once (GetOrAdd) and the alert has its own `AlertSent` flag.
+   Test: the snapshot call throws once, and the retry with the same id still posts a status.
+2. **Reviewer added time.** Azure DevOps writes a system thread when a reviewer is added
+   (`properties.CodeReviewThreadType` = `ReviewersUpdate`). Use its `publishedDate` as
+   `ReviewerAddedAt`. Today the service passes `null`.
