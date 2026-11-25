@@ -16,19 +16,30 @@ public sealed class TableAuditStore(TableServiceClient service) : IAuditStore
     private readonly TableClient decisions = service.GetTableClient("ReviewDecisions");
     private bool created;
 
-    public async Task<bool> TryMarkEventAsync(string eventId, CancellationToken ct)
+    public async Task<bool> IsEventSeenAsync(string eventId, CancellationToken ct)
     {
         await EnsureTablesAsync(ct).ConfigureAwait(false);
-        try
-        {
-            var day = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-            await events.AddEntityAsync(new TableEntity(day, Safe(eventId)), ct).ConfigureAwait(false);
-            return true;
-        }
-        catch (RequestFailedException ex) when (ex.Status == 409)
-        {
-            return false;
-        }
+        var (pk, rk) = EventKeys(eventId);
+        var existing = await events.GetEntityIfExistsAsync<TableEntity>(pk, rk, ["PartitionKey"], ct).ConfigureAwait(false);
+        return existing.HasValue;
+    }
+
+    public async Task MarkEventSeenAsync(string eventId, CancellationToken ct)
+    {
+        await EnsureTablesAsync(ct).ConfigureAwait(false);
+        var (pk, rk) = EventKeys(eventId);
+        // Upsert: two parallel deliveries of the same event may both get here.
+        await events.UpsertEntityAsync(new TableEntity(pk, rk) { ["SeenAt"] = DateTimeOffset.UtcNow }, TableUpdateMode.Replace, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The partition comes from the event id, not from today's date, so a retry on the next
+    /// day still finds the row. Event ids are GUIDs, so the first two characters spread the rows.
+    /// </summary>
+    private static (string Pk, string Rk) EventKeys(string eventId)
+    {
+        var rk = Safe(eventId);
+        return ("e" + rk[..Math.Min(2, rk.Length)].ToLowerInvariant(), rk);
     }
 
     public async Task<ApprovalRecord> GetOrAddApprovalAsync(ApprovalRecord candidate, CancellationToken ct)

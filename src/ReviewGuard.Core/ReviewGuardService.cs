@@ -20,11 +20,22 @@ public sealed class ReviewGuardService(
     {
         ArgumentNullException.ThrowIfNull(pr);
 
-        if (!await audit.TryMarkEventAsync(eventId, ct).ConfigureAwait(false))
+        if (await audit.IsEventSeenAsync(eventId, ct).ConfigureAwait(false))
         {
             return new(null, [], Skipped: true);
         }
 
+        // Mark the event only after all work is done. If anything below throws, the event
+        // stays unmarked and the Azure DevOps retry runs it again. A repeat run is safe:
+        // the approval time is stored once, and the alert has its own AlertSent flag.
+        var result = await ProcessAsync(pr, eventId, eventTime, ct).ConfigureAwait(false);
+        await audit.MarkEventSeenAsync(eventId, ct).ConfigureAwait(false);
+        return result;
+    }
+
+    private async Task<EvaluationResult> ProcessAsync(
+        PullRequestRef pr, string eventId, DateTimeOffset eventTime, CancellationToken ct)
+    {
         var snapshot = await azureDevOps.GetSnapshotAsync(pr, ct).ConfigureAwait(false);
         var approvers = snapshot.Approvers.Where(a => Votes.IsApproval(a.Vote)).ToList();
         if (!string.Equals(snapshot.Status, "active", StringComparison.OrdinalIgnoreCase) || approvers.Count == 0)
@@ -46,7 +57,7 @@ public sealed class ReviewGuardService(
                 snapshot.SourceCommitId,
                 record.FirstApprovedAt,
                 snapshot.LastPushAt,
-                ReviewerAddedAt: null,
+                ReviewerAddedAt(snapshot.ReviewerAdditions, approver.Id, record.FirstApprovedAt),
                 inlineComments);
 
             var decision = ReviewDepthRule.Evaluate(input, options);
@@ -79,6 +90,14 @@ public sealed class ReviewGuardService(
     public static int CountInlineComments(IEnumerable<ThreadInfo> threads, string reviewerId) =>
         threads.Count(t => t.FilePath is not null && t.Line is not null
             && t.CommentAuthorIds.Contains(reviewerId, StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>The last time someone else added this reviewer, before the approval. Null if never.</summary>
+    public static DateTimeOffset? ReviewerAddedAt(
+        IEnumerable<ReviewerAddition> additions, string reviewerId, DateTimeOffset approvedAt) =>
+        additions
+            .Where(a => string.Equals(a.ReviewerId, reviewerId, StringComparison.OrdinalIgnoreCase) && a.AddedAt <= approvedAt)
+            .Select(a => (DateTimeOffset?)a.AddedAt)
+            .Max();
 
     private static int Severity(ReviewDepthState state) => state switch
     {

@@ -17,9 +17,17 @@ public sealed record PullRequestSnapshot(
     int LatestIterationId,
     DateTimeOffset LastPushAt,
     IReadOnlyList<ApproverInfo> Approvers,
-    IReadOnlyList<ThreadInfo> Threads);
+    IReadOnlyList<ThreadInfo> Threads,
+    IReadOnlyList<ReviewerAddition> ReviewerAdditions);
 
 public sealed record ApproverInfo(string Id, string DisplayName, int Vote);
+
+/// <summary>
+/// Someone else added this reviewer to the PR at this time. From the "ReviewersUpdate" system
+/// threads. Self-joins (a reviewer who votes without being asked) are not included: Azure DevOps
+/// writes them at the moment of the vote, which would make every such review look like 0 s.
+/// </summary>
+public sealed record ReviewerAddition(string ReviewerId, DateTimeOffset AddedAt);
 
 /// <summary>One PR comment thread. FilePath and Line are null for general comments.</summary>
 public sealed record ThreadInfo(string? FilePath, int? Line, IReadOnlyList<string> CommentAuthorIds);
@@ -56,8 +64,14 @@ public sealed record DecisionRecord(
 /// <summary>Table Storage in Azure. Audit log, approval times and seen event ids.</summary>
 public interface IAuditStore
 {
-    /// <summary>Returns false if the event id was seen before (service hooks can deliver twice).</summary>
-    Task<bool> TryMarkEventAsync(string eventId, CancellationToken ct);
+    /// <summary>True if this event id was fully processed before (service hooks can deliver twice).</summary>
+    Task<bool> IsEventSeenAsync(string eventId, CancellationToken ct);
+
+    /// <summary>
+    /// Marks the event as processed. Called only after the work is done, so a failed run is
+    /// retried by Azure DevOps instead of being skipped as a duplicate.
+    /// </summary>
+    Task MarkEventSeenAsync(string eventId, CancellationToken ct);
 
     /// <summary>Returns the stored record, or stores and returns a new one with this approval time.</summary>
     Task<ApprovalRecord> GetOrAddApprovalAsync(ApprovalRecord candidate, CancellationToken ct);
