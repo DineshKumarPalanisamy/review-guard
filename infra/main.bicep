@@ -14,6 +14,9 @@ param azureDevOpsOrgUrl string = 'https://dev.azure.com/DigiCovai'
 @description('Object id of the person who deploys. Gets Key Vault Secrets Officer to set the secrets.')
 param deployerObjectId string
 
+@description('Email address that gets the fast-approval alert. Empty = no alert resources.')
+param alertEmail string = ''
+
 @description('Rule thresholds (DESIGN.md section 6).')
 param minLines int = 200
 param secondsPer100Lines int = 30
@@ -174,6 +177,52 @@ resource deployerTableAccess 'Microsoft.Authorization/roleAssignments@2022-04-01
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.storageTableDataContributor)
     principalId: deployerObjectId
     principalType: 'User'
+  }
+}
+
+// Alert channel. The Function writes "ALERT PR <id>: <reviewer>: <reason>" as a warning log.
+// This rule finds those lines every 5 minutes and emails them. One email per line (dimension Message).
+resource alertGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (!empty(alertEmail)) {
+  name: 'ag-${appName}'
+  location: 'global'
+  properties: {
+    groupShortName: 'ReviewGuard'
+    enabled: true
+    emailReceivers: [
+      { name: 'cto', emailAddress: alertEmail, useCommonAlertSchema: true }
+    ]
+  }
+}
+
+resource fastApprovalAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = if (!empty(alertEmail)) {
+  name: 'alert-${appName}-fast-approval'
+  location: location
+  properties: {
+    displayName: 'Review Guard: large PR approved too fast'
+    description: 'A reviewer approved a large PR fast and left no inline comments. See the PR status review-guard/review-depth.'
+    severity: 2
+    enabled: true
+    scopes: [logs.id]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    autoMitigate: false
+    criteria: {
+      allOf: [
+        {
+          query: 'AppTraces | where Message startswith "ALERT PR" | project TimeGenerated, Message'
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          dimensions: [
+            { name: 'Message', operator: 'Include', values: ['*'] }
+          ]
+          failingPeriods: { numberOfEvaluationPeriods: 1, minFailingPeriodsToAlert: 1 }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [alertGroup.id]
+    }
   }
 }
 

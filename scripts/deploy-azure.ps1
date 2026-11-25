@@ -4,7 +4,9 @@
 [CmdletBinding()]
 param(
     [string]$ResourceGroup = 'rg-review-guard',
-    [string]$Location = 'centralindia'
+    [string]$Location = 'centralindia',
+    # Gets the fast-approval email. Empty = no alert rule.
+    [string]$AlertEmail = ''
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -12,7 +14,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $me = az ad signed-in-user show --query id -o tsv
 az group create -n $ResourceGroup -l $Location --tags app=review-guard -o none
 $out = az deployment group create -g $ResourceGroup -n main `
-    --template-file "$root/infra/main.bicep" -p deployerObjectId=$me `
+    --template-file "$root/infra/main.bicep" -p deployerObjectId=$me alertEmail=$AlertEmail `
     --query properties.outputs -o json | ConvertFrom-Json
 
 $app = $out.functionAppName.value
