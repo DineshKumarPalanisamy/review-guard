@@ -17,8 +17,8 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('large-fast', 'small', 'large-with-comment', 'approve-before-pipeline')]
-    [string[]] $Scenarios = @('large-fast', 'small', 'large-with-comment', 'approve-before-pipeline'),
+    [ValidateSet('large-fast', 'small', 'large-with-comment', 'approve-before-pipeline', 'critical-small')]
+    [string[]] $Scenarios = @('large-fast', 'small', 'large-with-comment', 'approve-before-pipeline', 'critical-small'),
 
     [string] $Organization = 'https://dev.azure.com/DigiCovai',
     [string] $Project = 'Internal',
@@ -216,11 +216,12 @@ function Remove-Scenario([Nullable[int]] $PrId, [string] $Branch, [string] $Comm
 function Invoke-Scenario([string] $Name) {
     $stamp = Get-Date -Format 'yyyyMMddHHmmss'
     $branch = "e2e/$Name-$stamp"
-    $path = "/e2e/$Name-$stamp.cs"
+    # critical-small writes under a critical path (critical-paths.json in the Function).
+    $path = if ($Name -eq 'critical-small') { "/src/SampleApp/Payments/E2e$stamp.cs" } else { "/e2e/$Name-$stamp.cs" }
     $prId = $null
     $commit = $null
 
-    $lines = switch ($Name) { 'small' { 50 } default { 450 } }
+    $lines = switch ($Name) { 'small' { 50 } 'critical-small' { 30 } default { 450 } }
 
     try {
         Write-Host "[$Name] push $lines lines to $branch"
@@ -257,7 +258,7 @@ function Invoke-Scenario([string] $Name) {
                 Write-Host "[$Name] approved, waiting for the line count pipeline"
                 Wait-PrPipeline $prId $PipelineTimeoutSeconds | Out-Null
 
-                $expected = if ($Name -eq 'large-fast') { 'failed' } else { 'succeeded' }
+                $expected = if ($Name -in 'large-fast', 'critical-small') { 'failed' } else { 'succeeded' }
                 $status = Wait-ReviewDepthStatus $prId @('failed', 'succeeded') $StatusTimeoutSeconds
                 $ok = $status -and $status.state -eq $expected
                 return @{ Passed = $ok; Detail = "expected $expected, got $(${status}?.state): $(${status}?.description)" }

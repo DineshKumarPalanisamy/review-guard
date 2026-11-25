@@ -37,6 +37,11 @@ builder.Services.AddSingleton(sp =>
 });
 builder.Services.AddSingleton<IAuditStore, TableAuditStore>();
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<ReviewDepthOptions>>().Value);
+// Critical paths ship with the code (critical-paths.json). See DESIGN.md, decisions of 2026-11-25.
+var criticalPathsFile = Path.Combine(AppContext.BaseDirectory, "critical-paths.json");
+builder.Services.AddSingleton(File.Exists(criticalPathsFile)
+    ? CriticalPathConfig.FromJson(File.ReadAllText(criticalPathsFile))
+    : CriticalPathConfig.Empty);
 builder.Services.AddScoped<ReviewGuardService>();
 
 builder.Build().Run();

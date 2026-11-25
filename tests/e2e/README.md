@@ -27,6 +27,7 @@
 | `small` | 50 lines, wait for the pipeline, approve at once | `succeeded` |
 | `large-with-comment` | 450 lines, one inline comment on line 10, approve at once | `succeeded` |
 | `approve-before-pipeline` | 450 lines, approve before the pipeline ends | `pending`, then `failed` |
+| `critical-small` | 30 lines under `src/SampleApp/Payments/` (a critical path), approve at once | `failed` |
 
 Each scenario abandons its PR and deletes its branch at the end, also on failure.
 The exit code is 1 if any scenario fails.

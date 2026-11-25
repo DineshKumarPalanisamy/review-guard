@@ -13,7 +13,10 @@ public sealed class ReviewGuardServiceTests
     private readonly FakeAudit audit = new();
     private readonly FakeAlerts alerts = new();
 
-    private ReviewGuardService Service() => new(ado, audit, alerts, new ReviewDepthOptions());
+    private static readonly CriticalPathConfig Paths = new(["**/Payments/**"], new Dictionary<string, IReadOnlyList<string>>());
+
+    private ReviewGuardService Service(ReviewDepthOptions? options = null) =>
+        new(ado, audit, alerts, options ?? new ReviewDepthOptions(), Paths);
 
     private static PullRequestSnapshot Snapshot(
         int? lines = 450,
@@ -21,9 +24,11 @@ public sealed class ReviewGuardServiceTests
         IReadOnlyList<ApproverInfo>? approvers = null,
         IReadOnlyList<ThreadInfo>? threads = null,
         string status = "active",
-        IReadOnlyList<ReviewerAddition>? additions = null) =>
+        IReadOnlyList<ReviewerAddition>? additions = null,
+        IReadOnlyList<string>? paths = null) =>
         new(status, "c1", "Title", "https://x", lines, lineCommit, 3, Push,
-            approvers ?? [new ApproverInfo("ana", "Ana", Votes.Approved)], threads ?? [], additions ?? []);
+            approvers ?? [new ApproverInfo("ana", "Ana", Votes.Approved)], threads ?? [], additions ?? [],
+            "Internal", "sandbox", paths ?? ["/src/a.cs"]);
 
     [Fact]
     public async Task Fast_approval_posts_failed_and_alerts_once()
@@ -103,6 +108,47 @@ public sealed class ReviewGuardServiceTests
 
         Assert.Equal(Push.AddMinutes(5), ReviewGuardService.ReviewerAddedAt(additions, "ANA", Push.AddMinutes(10)));
         Assert.Null(ReviewGuardService.ReviewerAddedAt(additions, "cy", Push.AddMinutes(10)));
+    }
+
+    [Fact]
+    public async Task Small_pr_touching_a_critical_path_fails_with_reasons_in_the_alert()
+    {
+        ado.Snapshot = Snapshot(lines: 30, paths: ["/src/App/Payments/Charge.cs", "/src/App/Ui/Home.cs"]);
+
+        var result = await Service().EvaluateAsync(Pr, "e1", Push.AddSeconds(20), TestContext.Current.CancellationToken);
+
+        Assert.Equal(ReviewDepthState.Failed, result.Status!.State);
+        var alert = Assert.Single(alerts.Sent);
+        Assert.Contains(alert.Reasons!, r => r.Contains("/src/App/Payments/Charge.cs", StringComparison.Ordinal));
+        Assert.DoesNotContain(alert.Reasons!, r => r.Contains("Home.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Open_bot_threads_make_a_small_pr_risky_only_when_bot_names_are_set()
+    {
+        ado.Snapshot = Snapshot(lines: 30, threads: [new ThreadInfo("/src/a.cs", 4, ["bot"], "active", "Copilot")]);
+
+        var off = await Service().EvaluateAsync(Pr, "e1", Push.AddSeconds(20), TestContext.Current.CancellationToken);
+        var on = await Service(new ReviewDepthOptions { BotReviewerNames = ["copilot"] })
+            .EvaluateAsync(Pr, "e2", Push.AddSeconds(20), TestContext.Current.CancellationToken);
+
+        Assert.Equal(ReviewDepthState.Succeeded, off.Status!.State);
+        Assert.Equal(ReviewDepthState.Failed, on.Status!.State);
+    }
+
+    [Fact]
+    public void Only_unresolved_threads_started_by_a_bot_count()
+    {
+        ThreadInfo[] threads =
+        [
+            new("/a.cs", 1, ["b"], "active", "Copilot"),
+            new("/a.cs", 2, ["b"], "pending", "COPILOT"),
+            new("/a.cs", 3, ["b"], "fixed", "Copilot"),   // resolved
+            new("/a.cs", 4, ["x"], "active", "Ana"),      // not a bot
+        ];
+
+        Assert.Equal(2, ReviewGuardService.CountUnresolvedBotThreads(threads, ["Copilot"]));
+        Assert.Equal(0, ReviewGuardService.CountUnresolvedBotThreads(threads, []));
     }
 
     [Fact]

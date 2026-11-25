@@ -13,4 +13,16 @@ public sealed class ReviewDepthOptions
 
     /// <summary>Minimum review time allowed for each 100 changed lines.</summary>
     public int SecondsPer100Lines { get; set; } = 30;
+
+    /// <summary>
+    /// Lowest allowed review time for a PR that touches critical paths or has unresolved bot
+    /// review threads. Without it, a 20-line change to payment code would be allowed only 6 s.
+    /// </summary>
+    public int MinRiskyReviewSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Display names of bot reviewers (for example a Copilot review identity). Their unresolved
+    /// threads at approval time are a risk signal. Empty = signal off.
+    /// </summary>
+    public IReadOnlyList<string> BotReviewerNames { get; set; } = [];
 }

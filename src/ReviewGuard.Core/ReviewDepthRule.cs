@@ -18,6 +18,8 @@ public enum ReviewDepthState
 /// <param name="LastPushAt">createdDate of the latest PR iteration.</param>
 /// <param name="ReviewerAddedAt">When the reviewer was added, if known.</param>
 /// <param name="InlineCommentCount">Threads by this reviewer that have a file path and a line.</param>
+/// <param name="CriticalPaths">Changed paths that match the critical path list. Empty if none.</param>
+/// <param name="UnresolvedBotThreads">Bot review threads (for example Copilot) still open at approval.</param>
 public sealed record ReviewInput(
     int? ChangedLines,
     string? LineCountCommitId,
@@ -25,18 +27,24 @@ public sealed record ReviewInput(
     DateTimeOffset ApprovedAt,
     DateTimeOffset LastPushAt,
     DateTimeOffset? ReviewerAddedAt,
-    int InlineCommentCount);
+    int InlineCommentCount,
+    IReadOnlyList<string>? CriticalPaths = null,
+    int UnresolvedBotThreads = 0);
 
 /// <param name="Alert">True when the CTO must get an alert.</param>
+/// <param name="Reasons">One line per signal, for the alert and the audit log.</param>
 public sealed record ReviewDecision(
     ReviewDepthState State,
     string Description,
     bool Alert,
     TimeSpan? ReviewTime = null,
-    TimeSpan? AllowedTime = null);
+    TimeSpan? AllowedTime = null,
+    IReadOnlyList<string>? Reasons = null);
 
 /// <summary>
-/// The version 1 rule from docs/DESIGN.md section 6. Pure function: no I/O, no clock.
+/// The evidence rule (ROADMAP.md, Phase 2). Pure function: no I/O, no clock.
+/// A PR is risky when it is large, touches critical paths, or has unresolved bot review threads.
+/// A risky PR fails when it was approved fast AND the reviewer left no inline comments.
 /// </summary>
 public static class ReviewDepthRule
 {
@@ -55,7 +63,10 @@ public static class ReviewDepthRule
             return new(ReviewDepthState.Pending, "Line count is for an older commit, waiting for the pipeline", Alert: false);
         }
 
-        if (lines < options.MinLines)
+        var critical = input.CriticalPaths ?? [];
+        var large = lines >= options.MinLines;
+        var hasBotThreads = input.UnresolvedBotThreads > 0;
+        if (!large && critical.Count == 0 && !hasBotThreads)
         {
             return new(ReviewDepthState.Succeeded, Invariant($"Small PR ({lines} lines), not checked"), Alert: false);
         }
@@ -68,31 +79,77 @@ public static class ReviewDepthRule
             reviewTime = TimeSpan.Zero;
         }
 
-        var allowedTime = TimeSpan.FromSeconds(lines * options.SecondsPer100Lines / 100.0);
+        var allowedSeconds = lines * options.SecondsPer100Lines / 100.0;
+        if (critical.Count > 0 || hasBotThreads)
+        {
+            allowedSeconds = Math.Max(allowedSeconds, options.MinRiskyReviewSeconds);
+        }
+
+        var allowedTime = TimeSpan.FromSeconds(allowedSeconds);
         var seconds = (int)reviewTime.TotalSeconds;
+        var risk = RiskText(critical.Count, input.UnresolvedBotThreads);
 
         if (reviewTime > allowedTime)
         {
-            return new(ReviewDepthState.Succeeded, Invariant($"{lines} lines reviewed in {seconds} s"), Alert: false, reviewTime, allowedTime);
+            return new(ReviewDepthState.Succeeded, Invariant($"{lines} lines{risk} reviewed in {seconds} s"), Alert: false, reviewTime, allowedTime);
         }
 
         if (input.InlineCommentCount > 0)
         {
-            // Version 1 trusts inline comments. Later: LLM judge of the comments.
+            // Inline comments count as evidence. Later: LLM judge of the comments.
             return new(
                 ReviewDepthState.Succeeded,
-                Invariant($"{lines} lines approved in {seconds} s, {input.InlineCommentCount} inline comments"),
+                Invariant($"{lines} lines{risk} approved in {seconds} s, {input.InlineCommentCount} inline comments"),
                 Alert: false,
                 reviewTime,
                 allowedTime);
         }
 
+        var reasons = new List<string>();
+        if (large)
+        {
+            reasons.Add(Invariant($"Large PR: {lines} changed lines (limit {options.MinLines})"));
+        }
+
+        if (critical.Count > 0)
+        {
+            var shown = string.Join(", ", critical.Take(3));
+            var more = critical.Count > 3 ? Invariant($" and {critical.Count - 3} more") : "";
+            reasons.Add($"Touches critical paths: {shown}{more}");
+        }
+
+        if (hasBotThreads)
+        {
+            reasons.Add(Invariant($"{input.UnresolvedBotThreads} unresolved bot review threads at approval"));
+        }
+
+        reasons.Add(Invariant($"Approved in {seconds} s (allowed {(int)allowedSeconds} s)"));
+        reasons.Add("No inline comments by the reviewer");
+
         return new(
             ReviewDepthState.Failed,
-            Invariant($"{lines} lines approved in {seconds} s, no inline comments"),
+            Invariant($"{lines} lines{risk} approved in {seconds} s, no inline comments"),
             Alert: true,
             reviewTime,
-            allowedTime);
+            allowedTime,
+            reasons);
+    }
+
+    /// <summary>" (2 critical files, 1 open bot thread)" or "" when neither.</summary>
+    private static string RiskText(int criticalFiles, int botThreads)
+    {
+        var parts = new List<string>();
+        if (criticalFiles > 0)
+        {
+            parts.Add(Invariant($"{criticalFiles} critical {(criticalFiles == 1 ? "file" : "files")}"));
+        }
+
+        if (botThreads > 0)
+        {
+            parts.Add(Invariant($"{botThreads} open bot {(botThreads == 1 ? "thread" : "threads")}"));
+        }
+
+        return parts.Count == 0 ? "" : $" ({string.Join(", ", parts)})";
     }
 
     private static string Invariant(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);

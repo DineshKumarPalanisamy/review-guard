@@ -13,7 +13,8 @@ public sealed class ReviewGuardService(
     IAzureDevOpsClient azureDevOps,
     IAuditStore audit,
     IAlertSender alerts,
-    ReviewDepthOptions options)
+    ReviewDepthOptions options,
+    CriticalPathConfig criticalPaths)
 {
     public async Task<EvaluationResult> EvaluateAsync(
         PullRequestRef pr, string eventId, DateTimeOffset eventTime, CancellationToken ct)
@@ -44,6 +45,11 @@ public sealed class ReviewGuardService(
             return new(null, [], Skipped: true);
         }
 
+        // Same for every approver: which changed files are critical, and open bot threads.
+        var patterns = criticalPaths.PatternsFor(snapshot.ProjectName, snapshot.RepositoryName);
+        var critical = PathMatcher.Matching(snapshot.ChangedPaths ?? [], patterns);
+        var botThreads = CountUnresolvedBotThreads(snapshot.Threads, options.BotReviewerNames);
+
         var decisions = new List<(ApprovalRecord Record, ApproverInfo Approver, DecisionRecord Row)>();
         foreach (var approver in approvers)
         {
@@ -58,7 +64,9 @@ public sealed class ReviewGuardService(
                 record.FirstApprovedAt,
                 snapshot.LastPushAt,
                 ReviewerAddedAt(snapshot.ReviewerAdditions, approver.Id, record.FirstApprovedAt),
-                inlineComments);
+                inlineComments,
+                critical,
+                botThreads);
 
             var decision = ReviewDepthRule.Evaluate(input, options);
             var row = new DecisionRecord(pr, approver.Id, approver.DisplayName, snapshot.SourceCommitId, eventId, decision, snapshot.ChangedLines, inlineComments);
@@ -78,7 +86,7 @@ public sealed class ReviewGuardService(
         {
             if (row.Decision.Alert && !record.AlertSent)
             {
-                await alerts.SendAsync(new AlertMessage(pr, snapshot.Title, snapshot.WebUrl, approver.DisplayName, row.Decision.Description), ct).ConfigureAwait(false);
+                await alerts.SendAsync(new AlertMessage(pr, snapshot.Title, snapshot.WebUrl, approver.DisplayName, row.Decision.Description, row.Decision.Reasons), ct).ConfigureAwait(false);
                 await audit.MarkAlertSentAsync(record, ct).ConfigureAwait(false);
             }
         }
@@ -90,6 +98,12 @@ public sealed class ReviewGuardService(
     public static int CountInlineComments(IEnumerable<ThreadInfo> threads, string reviewerId) =>
         threads.Count(t => t.FilePath is not null && t.Line is not null
             && t.CommentAuthorIds.Contains(reviewerId, StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>Open threads started by a bot reviewer. Zero when no bot names are set.</summary>
+    public static int CountUnresolvedBotThreads(IEnumerable<ThreadInfo> threads, IReadOnlyCollection<string> botNames) =>
+        botNames.Count == 0
+            ? 0
+            : threads.Count(t => t.IsUnresolved && t.StartedBy is not null && botNames.Contains(t.StartedBy, StringComparer.OrdinalIgnoreCase));
 
     /// <summary>The last time someone else added this reviewer, before the approval. Null if never.</summary>
     public static DateTimeOffset? ReviewerAddedAt(

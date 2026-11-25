@@ -63,4 +63,22 @@ public sealed class AzureDevOpsJsonTests
         Assert.Equal("x", AzureDevOpsJson.ReadProperty(doc.RootElement, "b"));
         Assert.Null(AzureDevOpsJson.ReadProperty(doc.RootElement, "c"));
     }
+
+    [Fact]
+    public void Changed_paths_skip_folders_and_missing_items()
+    {
+        using var doc = JsonDocument.Parse("""
+            {
+              "changeEntries": [
+                { "changeType": "add", "item": { "path": "/src/SampleApp/Auth/TokenService.cs" } },
+                { "changeType": "add", "item": { "path": "/src/SampleApp/Auth", "isFolder": true } },
+                { "changeType": "delete", "item": { "path": "/src/Old.cs" } },
+                { "changeType": "edit" }
+              ],
+              "nextSkip": 4, "nextTop": 2
+            }
+            """);
+
+        Assert.Equal(["/src/SampleApp/Auth/TokenService.cs", "/src/Old.cs"], AzureDevOpsJson.ReadChangedPaths(doc.RootElement));
+    }
 }

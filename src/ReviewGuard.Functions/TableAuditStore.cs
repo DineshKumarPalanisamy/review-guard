@@ -105,6 +105,7 @@ public sealed class TableAuditStore(TableServiceClient service) : IAuditStore
             ["InlineComments"] = record.InlineComments,
             ["ReviewSeconds"] = record.Decision.ReviewTime?.TotalSeconds,
             ["AllowedSeconds"] = record.Decision.AllowedTime?.TotalSeconds,
+            ["Reasons"] = record.Decision.Reasons is { Count: > 0 } reasons ? string.Join("; ", reasons) : null,
         };
         await decisions.AddEntityAsync(entity, ct).ConfigureAwait(false);
     }

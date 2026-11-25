@@ -18,7 +18,10 @@ public sealed record PullRequestSnapshot(
     DateTimeOffset LastPushAt,
     IReadOnlyList<ApproverInfo> Approvers,
     IReadOnlyList<ThreadInfo> Threads,
-    IReadOnlyList<ReviewerAddition> ReviewerAdditions);
+    IReadOnlyList<ReviewerAddition> ReviewerAdditions,
+    string? ProjectName = null,
+    string? RepositoryName = null,
+    IReadOnlyList<string>? ChangedPaths = null);
 
 public sealed record ApproverInfo(string Id, string DisplayName, int Vote);
 
@@ -30,7 +33,20 @@ public sealed record ApproverInfo(string Id, string DisplayName, int Vote);
 public sealed record ReviewerAddition(string ReviewerId, DateTimeOffset AddedAt);
 
 /// <summary>One PR comment thread. FilePath and Line are null for general comments.</summary>
-public sealed record ThreadInfo(string? FilePath, int? Line, IReadOnlyList<string> CommentAuthorIds);
+/// <param name="Status">Azure DevOps thread status: active, pending, fixed, wontFix, closed, byDesign.</param>
+/// <param name="StartedBy">Display name of the author of the first comment.</param>
+public sealed record ThreadInfo(
+    string? FilePath,
+    int? Line,
+    IReadOnlyList<string> CommentAuthorIds,
+    string? Status = null,
+    string? StartedBy = null)
+{
+    /// <summary>Active or pending. Unknown status counts as resolved.</summary>
+    public bool IsUnresolved =>
+        string.Equals(Status, "active", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Status, "pending", StringComparison.OrdinalIgnoreCase);
+}
 
 public sealed record PrStatus(ReviewDepthState State, string Description, int IterationId);
 
@@ -86,7 +102,8 @@ public sealed record AlertMessage(
     string? Title,
     string? WebUrl,
     string ReviewerName,
-    string Description);
+    string Description,
+    IReadOnlyList<string>? Reasons = null);
 
 /// <summary>Sends the alert to the CTO (Teams Workflows webhook).</summary>
 public interface IAlertSender

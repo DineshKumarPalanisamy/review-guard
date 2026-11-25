@@ -21,6 +21,7 @@ PR status: genre `review-guard`, name `review-depth`. States: `succeeded`, `fail
 |---|---|
 | `src/ReviewGuard.Core` | The rule and the service. No I/O. |
 | `src/ReviewGuard.Functions` | Azure Function (.NET 10 isolated): HTTP triggers, Azure DevOps client, Table audit, Teams alert |
+| `src/ReviewGuard.Functions/critical-paths.json` | Critical paths per project and repository. Ships with the Function. |
 | `tests/ReviewGuard.Core.Tests` | Unit tests (`dotnet test`) |
 | `tests/e2e` | End-to-end test against the sandbox repo |
 | `pipelines` | Line count pipeline (copy into each guarded repo) |
@@ -46,6 +47,8 @@ PR status: genre `review-guard`, name `review-depth`. States: `succeeded`, `fail
 |---|---|---|
 | `ReviewGuard__MinLines` | 200 | Smaller PRs are not checked |
 | `ReviewGuard__SecondsPer100Lines` | 30 | Allowed review time |
+| `ReviewGuard__MinRiskyReviewSeconds` | 60 | Lowest allowed review time when the PR touches critical paths or has open bot threads |
+| `ReviewGuard__BotReviewerNames__0` | empty | Display name of a bot reviewer (for example Copilot). Its open threads make a PR risky. Empty = off |
 | `ReviewGuard__OrganizationUrl` | | `https://dev.azure.com/<org>` |
 | `ReviewGuard__Pat` | Key Vault ref | Azure DevOps PAT |
 | `ReviewGuard__WebhookSecret` | Key Vault ref | Must match the `X-ReviewGuard-Secret` header |

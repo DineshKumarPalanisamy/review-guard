@@ -42,6 +42,9 @@ public sealed class AzureDevOpsClient(HttpClient http, IOptions<AzureDevOpsOptio
         var latestIteration = iterationsDoc.RootElement.GetProperty("value").EnumerateArray()
             .OrderByDescending(i => i.GetProperty("id").GetInt32())
             .First();
+        var latestIterationId = latestIteration.GetProperty("id").GetInt32();
+        var changedPaths = await GetChangedPathsAsync(baseUrl, latestIterationId, ct).ConfigureAwait(false);
+        var repository = p.TryGetProperty("repository", out var repo) ? repo : default;
 
         var approvers = p.TryGetProperty("reviewers", out var reviewers)
             ? reviewers.EnumerateArray()
@@ -60,11 +63,40 @@ public sealed class AzureDevOpsClient(HttpClient http, IOptions<AzureDevOpsOptio
             WebUrl: $"{options.Value.OrganizationUrl.TrimEnd('/')}/{pr.ProjectId}/_git/{pr.RepositoryId}/pullrequest/{pr.PullRequestId}",
             ChangedLines: lines,
             LineCountCommitId: AzureDevOpsJson.ReadProperty(props, CommitProperty),
-            LatestIterationId: latestIteration.GetProperty("id").GetInt32(),
+            LatestIterationId: latestIterationId,
             LastPushAt: latestIteration.GetProperty("createdDate").GetDateTimeOffset(),
             Approvers: approvers,
             Threads: [.. threadsDoc.RootElement.GetProperty("value").EnumerateArray().Select(ReadThread)],
-            ReviewerAdditions: AzureDevOpsJson.ReadReviewerAdditions(threadsDoc.RootElement));
+            ReviewerAdditions: AzureDevOpsJson.ReadReviewerAdditions(threadsDoc.RootElement),
+            ProjectName: repository.ValueKind == JsonValueKind.Object && repository.TryGetProperty("project", out var proj)
+                && proj.TryGetProperty("name", out var pn) ? pn.GetString() : null,
+            RepositoryName: repository.ValueKind == JsonValueKind.Object && repository.TryGetProperty("name", out var rn) ? rn.GetString() : null,
+            ChangedPaths: changedPaths);
+    }
+
+    /// <summary>
+    /// All files the PR changes, compared with the target branch ($compareTo=0), not only the
+    /// last push. The API returns pages: loop until nextSkip is 0, or large PRs lose files.
+    /// </summary>
+    private async Task<List<string>> GetChangedPathsAsync(string baseUrl, int iterationId, CancellationToken ct)
+    {
+        const int PageSize = 1000;
+        var paths = new List<string>();
+        var skip = 0;
+        while (true)
+        {
+            using var doc = await GetJsonAsync(
+                $"{baseUrl}/iterations/{iterationId}/changes?$compareTo=0&$top={PageSize}&$skip={skip}&{ApiVersion}", ct).ConfigureAwait(false);
+            paths.AddRange(AzureDevOpsJson.ReadChangedPaths(doc.RootElement));
+
+            var next = doc.RootElement.TryGetProperty("nextSkip", out var n) && n.ValueKind == JsonValueKind.Number ? n.GetInt32() : 0;
+            if (next <= skip)
+            {
+                return paths;
+            }
+
+            skip = next;
+        }
     }
 
     public async Task PostStatusAsync(PullRequestRef pr, PrStatus status, CancellationToken ct)
@@ -139,7 +171,13 @@ public sealed class AzureDevOpsClient(HttpClient http, IOptions<AzureDevOpsOptio
                 .Select(c => c.GetProperty("author").GetProperty("id").GetString() ?? "")
                 .ToList();
 
-        return new ThreadInfo(filePath, line, authors);
+        var status = thread.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString() : null;
+        var startedBy = thread.TryGetProperty("comments", out var all) && all.GetArrayLength() > 0
+            && all[0].TryGetProperty("author", out var first) && first.TryGetProperty("displayName", out var name)
+            ? name.GetString()
+            : null;
+
+        return new ThreadInfo(filePath, line, authors, status, startedBy);
     }
 
     private static int? ReadLine(JsonElement ctx, string name) =>
