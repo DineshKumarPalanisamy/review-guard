@@ -30,7 +30,7 @@ be approved in under about 2 minutes to fail). The changes below close that gap.
 |---|---|---|---|
 | 3 | Get the changed file paths from the iteration changes API (`$compareTo=0`, with paging) | `AzureDevOpsClient`, `PullRequestSnapshot` | Critical paths (#5) need to know which files changed, from a source the author can't edit |
 | 4 | Replace the time gate with a list of evidence signals. Time becomes one signal. | `ReviewDepthRule`, `ReviewInput`, `ReviewDecision` | The clock starts at the last push. A reviewer who waits a few minutes and then approves without reading always passes. |
-| 5 | Default critical paths plus a pure `PathMatcher` | `ReviewDepthOptions`, new file in Core | "Payment code changed, nobody commented" matters more than "big PR". Test with the sample files in `review-guard-sandbox` (`src/SampleApp/Auth`, `src/SampleApp/Payments`). |
+| 5 | Critical paths: `critical-paths.json` in this repository, shipped with the Function. Lists per project and per repository, with a default. A pure `PathMatcher` matches the PR's changed paths. | `src/ReviewGuard.Functions/critical-paths.json`, new `PathMatcher` and `CriticalPathConfig` in Core | "Payment code changed, nobody commented" matters more than "big PR". One file serves every repo. App developers can't edit it, and an app PR can't change its own list. Test with the sample files in `review-guard-sandbox` (`src/SampleApp/Auth`, `src/SampleApp/Payments`). |
 | 6 | Count unresolved Copilot review threads at approval time | `AzureDevOpsClient`, rule | A strong signal that needs no code access |
 | 7 | The alert lists the reasons, not one sentence | `AlertMessage`, `TeamsAlertSender` | The decision maker sees why without opening the PR |
 

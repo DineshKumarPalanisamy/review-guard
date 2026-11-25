@@ -172,6 +172,25 @@ Status contract (the branch policy matches on `genre` + `name`):
 | - | Build hook | `build.complete` with resource version 2.0. Version 1.0 has no PR number or repository. |
 | - | Sandbox | Repo `review-guard-sandbox` in project `Internal` guards branch `trunk`, not `main`: project-wide policies on `main` block direct pushes, and the setup script must push the pipeline file. |
 
+### Decisions (2026-11-25)
+
+| # | Question | Decision |
+|---|---|---|
+| - | Where the critical paths live | `critical-paths.json` in this repository, shipped inside the Function package. Only people who can merge to review-guard can change it, not app developers. A change needs a redeploy, which is fine because the list changes rarely. No separate config repository: too much for one file. |
+| - | How the Function picks the list | By project and repository name, read from the PR. Order: `Project/Repository` entry, then `Project` entry, then `default`. |
+| - | Public repository | The sandbox list is safe to publish. A real company keeps its own list private (a private fork). |
+| - | Several repositories | One Function app serves all of them. The hook event carries the repository id. The PR-updated hook loses its repository filter when more repositories join. |
+
+```json
+{
+  "default": ["**/Auth/**", "**/Payments/**", "**/Security/**"],
+  "projects": {
+    "Internal": ["**/Migrations/**"],
+    "Internal/review-guard-sandbox": ["src/SampleApp/Auth/**", "src/SampleApp/Payments/**"]
+  }
+}
+```
+
 ## 13. Open questions
 
 1. Who can clear a `failed` status? Proposal: a second reviewer's approval, or a new inline
